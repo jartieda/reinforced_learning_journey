@@ -251,6 +251,14 @@ ssh -p <PORT> -L 6006:127.0.0.1:6006 -N root@<HOST> &
 # then open http://localhost:6006
 ```
 
+#### web rtc
+
+```
+wget https://downloads.isaacsim.nvidia.com/isaacsim-webrtc-streaming-client-1.1.5-linux-x64.AppImage
+chmod +x isaacsim-webrtc-streaming-client-1.1.5-linux-x64.AppImage 
+sudo apt-get install -y libfuse2 libnspr4 libnss3 libasound2-dev
+```
+
 ---
 
 ## Key Learning Point

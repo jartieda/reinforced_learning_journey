@@ -10,6 +10,7 @@
 #   --disk    Disk size in GB  (default: 40)
 #   --image   Docker image     (default: pytorch/pytorch:2.7.0-cuda12.8-cudnn9-devel)
 #   --max-dph Max $/hour       (default: 0.50)
+#   --min-dph Min $/hour       (default: 0.00, skip suspiciously cheap offers)
 #   --isaac   Use Isaac Sim image instead (overrides --image)
 #
 # Examples:
@@ -48,6 +49,7 @@ GPU_FILTER="RTX_3090"
 DISK_GB=40
 IMAGE="pytorch/pytorch:2.7.0-cuda12.8-cudnn9-devel"
 MAX_DPH=0.50
+MIN_DPH=0.00
 ISAAC=0
 LIVESTREAM=0
 TRAIN_CMD=()
@@ -58,8 +60,9 @@ while [[ $# -gt 0 ]]; do
     --gpu)        GPU_FILTER="$2"; shift 2 ;;
     --disk)        DISK_GB="$2";    shift 2 ;;
     --image)       IMAGE="$2";      shift 2 ;;
-    --max-dph)     MAX_DPH="$2";   shift 2 ;;
-    --isaac)       ISAAC=1;         shift   ;;
+    --max-dph)     MAX_DPH="$2";    shift 2 ;;
+    --min-dph)     MIN_DPH="$2";    shift 2 ;;
+    --isaac)       ISAAC=1;          shift   ;;
     --livestream)  LIVESTREAM="$2"; shift 2 ;;
     --)            shift; TRAIN_CMD=("$@"); break ;;
     *)             echo "Unknown option: $1"; exit 1 ;;
@@ -118,11 +121,11 @@ fi
 if [[ $SKIP_CREATE -eq 0 ]]; then
 # ── Find cheapest matching offer ------------------------------------------
 echo ""
-echo "Searching for offers: gpu=$GPU_FILTER, max_dph=$MAX_DPH ..."
+echo "Searching for offers: gpu=$GPU_FILTER, dph=${MIN_DPH}–${MAX_DPH} ..."
 OFFER_JSON=$(vastai search offers \
   --raw \
   --order dph_total \
-  "gpu_name=$GPU_FILTER num_gpus=1 reliability>0.95 inet_down>100 disk_space>=$DISK_GB dph_total<=$MAX_DPH" \
+  "gpu_name=$GPU_FILTER num_gpus=1 reliability>0.95 inet_down>100 disk_space>=$DISK_GB dph_total<=$MAX_DPH dph_total>=$MIN_DPH" \
   2>/dev/null)
 
 if [[ -z "$OFFER_JSON" ]]; then
@@ -131,8 +134,27 @@ if [[ -z "$OFFER_JSON" ]]; then
   exit 1
 fi
 
-OFFER_ID=$(echo "$OFFER_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['ask_contract_id'])")
-OFFER_DPH=$(echo "$OFFER_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(round(d[0]['dph_total'],4))" 2>/dev/null || echo "?")
+# Machines known to be broken (never boot / SSH unreachable).
+# Add machine_id values here to permanently skip them.
+BANNED_MACHINES="9020"
+
+OFFER_ID=$(echo "$OFFER_JSON" | python3 -c "
+import sys, json
+banned = {int(x) for x in '$BANNED_MACHINES'.split() if x}
+min_dph = float('$MIN_DPH')
+offers = [o for o in json.load(sys.stdin) if o.get('machine_id') not in banned and o.get('dph_total', 0) >= min_dph]
+if not offers:
+    print('ERROR: no offers left after filters', file=sys.stderr)
+    sys.exit(1)
+print(offers[0]['ask_contract_id'])
+")
+OFFER_DPH=$(echo "$OFFER_JSON" | python3 -c "
+import sys, json
+banned = {int(x) for x in '$BANNED_MACHINES'.split() if x}
+min_dph = float('$MIN_DPH')
+offers = [o for o in json.load(sys.stdin) if o.get('machine_id') not in banned and o.get('dph_total', 0) >= min_dph]
+print(round(offers[0]['dph_total'], 4)) if offers else print('?')
+" 2>/dev/null || echo "?")
 
 echo "  \u2192 Best offer: id=$OFFER_ID  (\$$OFFER_DPH/hr)"
 echo ""
@@ -177,7 +199,7 @@ echo ""
 
 # ── Wait for SSH to become available --------------------------------------
 echo "Waiting for instance to boot (this takes 1\u20133 minutes) ..."
-MAX_WAIT=300
+MAX_WAIT=600
 ELAPSED=0
 SSH_URL=""
 
@@ -257,11 +279,11 @@ if [[ $ISAAC -eq 1 ]]; then
 
   # 2. Install Isaac Lab core into Isaac Sim's Python
   echo "Installing isaaclab into Isaac Sim Python ..."
-  \$ISAAC_PY -m pip install --no-cache-dir -e /workspace/isaaclab_src/source/isaaclab 2>&1 | tail -5
+  \$ISAAC_PY -m pip install --no-cache-dir -e /workspace/isaaclab_src/source/isaaclab 
 
   # 3. Install skrl, gymnasium, and h5py into same Python
   #    h5py is required by isaaclab_tasks at extension startup (recorder_manager)
-  \$ISAAC_PY -m pip install --no-cache-dir "skrl>=2.0.0" "gymnasium>=1.0.0" h5py 2>&1 | tail -5
+  \$ISAAC_PY -m pip install --no-cache-dir "skrl>=2.0.0" "gymnasium>=1.0.0" h5py 
 else
   # ── Regular PyTorch image ───────────────────────────────────────────────
   # --break-system-packages is safe: we own the whole container.
@@ -304,7 +326,14 @@ echo "  Tail log:  ssh -p $SSH_PORT root@$SSH_HOST 'tail -f /workspace/train.log
 pkill -f 'tensorboard' 2>/dev/null || true
 nohup tensorboard --logdir /workspace/reinforced/runs --host 127.0.0.1 --port 6006 \
   > /tmp/tb.log 2>&1 &
-echo "  TensorBoard started on remote port 6006"
+# Wait until TensorBoard is actually listening before the tunnel is opened
+for _i in {1..15}; do
+  sleep 2
+  if ss -tlnp 2>/dev/null | grep -q ':6006' || netstat -tlnp 2>/dev/null | grep -q ':6006'; then
+    echo "  TensorBoard ready on remote port 6006"
+    break
+  fi
+done
 REMOTE
 
 # ── SSH tunnel for TensorBoard (background, killed on script exit) ---------
@@ -316,6 +345,28 @@ trap 'kill $TB_TUNNEL_PID 2>/dev/null' EXIT
 echo "  TensorBoard: http://localhost:6006  (tunnel PID $TB_TUNNEL_PID)"
 echo "  To keep it open after this script exits, run:"
 echo "    ssh $SSH_OPTS -p $SSH_PORT -L 6006:127.0.0.1:6006 -N root@$SSH_HOST &"
+
+# ── Resolve mapped WebRTC ports from vast.ai API --------------------------
+VAST_TCP_PORT_49100=""
+VAST_UDP_PORT_47998=""
+if [[ $LIVESTREAM -eq 2 ]]; then
+  PORT_JSON=$(vastai show instance "$INSTANCE_ID" --raw 2>/dev/null || true)
+  VAST_TCP_PORT_49100=$(echo "$PORT_JSON" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+ports = d.get('ports') or {}
+# key format is '49100/tcp'
+entry = ports.get('49100/tcp', [{}])
+print(entry[0].get('HostPort', '?') if entry else '?')
+" 2>/dev/null || echo "?")
+  VAST_UDP_PORT_47998=$(echo "$PORT_JSON" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+ports = d.get('ports') or {}
+entry = ports.get('47998/udp', [{}])
+print(entry[0].get('HostPort', '?') if entry else '?')
+" 2>/dev/null || echo "?")
+fi
 
 # ── Print summary ----------------------------------------------------------
 echo ""
