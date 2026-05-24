@@ -261,6 +261,78 @@ sudo apt-get install -y libfuse2 libnspr4 libnss3 libasound2-dev
 
 ---
 
+## Recording a Video of the Trained Policy
+
+
+`record.py` loads a saved checkpoint and rolls out the policy for N steps,
+writing each camera observation to an MP4 file. It uses a single environment
+(`num_envs=1`) to keep VRAM low.
+
+### Install dependencies (once, inside Isaac Sim Python)
+
+```bash
+/isaac-sim/python.sh -m pip install imageio imageio-ffmpeg
+```
+
+### Run
+
+```bash
+# On remote (inside the isaac-sim container)
+cd /workspace/reinforced
+export PYTHONPATH=/workspace/reinforced
+/isaac-sim/python.sh -m examples.07_isaac_transfer.record \
+    --checkpoint runs/07_isaac_transfer/07_isaac_transfer/checkpoints/best_agent.pt \
+    --steps 600 --fps 30 --output /workspace/recording.mp4
+
+# Background (non-blocking, logs to /tmp/record.log)
+nohup /isaac-sim/python.sh -m examples.07_isaac_transfer.record \
+    --checkpoint runs/07_isaac_transfer/07_isaac_transfer/checkpoints/best_agent.pt \
+    --steps 600 --fps 30 --output /workspace/recording.mp4 \
+    > /tmp/record.log 2>&1 &
+echo PID:$!
+```
+
+Isaac Sim takes ~2 minutes to boot; the actual rollout (~600 steps) runs in
+~30 seconds afterwards. Monitor progress with `tail -f /tmp/record.log`.
+
+### Download the video
+
+```bash
+# From local machine
+scp -P <PORT> root@<HOST>:/workspace/recording.mp4 ./recording.mp4
+# or with rsync
+rsync -avz -e "ssh -p <PORT>" root@<HOST>:/workspace/recording.mp4 ./recording.mp4
+```
+
+<video src="./recording.mp4" controls width="720">
+  <a href="./recording.mp4">recording.mp4</a>
+</video>
+
+### CLI arguments
+
+| Argument | Default | Description |
+|---|---|---|
+| `--checkpoint` | *(required)* | Path to `.pt` checkpoint file |
+| `--env-id` | `Isaac-Cartpole-Camera-Showcase-Box-Box-Direct-v0` | Isaac Lab environment ID |
+| `--steps` | `500` | Number of simulation steps to record |
+| `--output` | `/workspace/recording.mp4` | Output video file path |
+| `--fps` | `30` | Output video frame rate |
+| `--env-idx` | `0` | Which parallel env instance to use for the video |
+
+### Implementation notes
+
+- **`policy.to(device)` is required** after `load_state_dict()`. Initialising
+  the model with `device=` is not sufficient — weights stay on CPU until
+  explicitly moved, causing a `cuda/cpu type mismatch` error at inference.
+- **`policy.act()` returns 2 values** in skrl (`action, info_dict`), not 3.
+  Always unpack as `action, _ = policy.act(...)`.
+- Frame normalisation handles both `float32` (normalised to 0–255 uint8) and
+  native `uint8` observations transparently.
+- If `imageio` is unavailable, the script falls back to `opencv` and then to
+  saving individual PNG frames for manual `ffmpeg` assembly.
+
+---
+
 ## Key Learning Point
 
 Good algorithm abstractions transfer across simulators with minimal changes.

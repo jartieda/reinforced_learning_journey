@@ -6,19 +6,32 @@
 #   bash scripts/vast_launch.sh [options] -- <python -m module> [module-args]
 #
 # Options:
-#   --gpu     GPU model filter (default: RTX_3090)
-#   --disk    Disk size in GB  (default: 40)
-#   --image   Docker image     (default: pytorch/pytorch:2.7.0-cuda12.8-cudnn9-devel)
-#   --max-dph Max $/hour       (default: 0.50)
-#   --min-dph Min $/hour       (default: 0.00, skip suspiciously cheap offers)
-#   --isaac   Use Isaac Sim image instead (overrides --image)
+#   --gpu         GPU model filter (default: RTX_3090)
+#   --disk        Disk size in GB  (default: 40)
+#   --image       Docker image     (default: pytorch/pytorch:2.7.0-cuda12.8-cudnn9-devel)
+#   --max-dph     Max $/hour       (default: 0.50)
+#   --min-dph     Min $/hour       (default: 0.00, skip suspiciously cheap offers)
+#   --isaac        Use Isaac Sim image instead (overrides --image)
+#   --livestream  Streaming mode (default: 0 = disabled):
+#                   2 = WebRTC  ← the only working mode for vast.ai
+#                       The streaming client hardcodes port 49100; it cannot use the
+#                       dynamically-mapped vast.ai host port.  Use --livestream 2 so
+#                       Isaac Sim binds 49100/tcp and the SSH tunnel forwards it to
+#                       localhost:49100.  Enter "localhost" in the streaming client.
+#                   1 = WebRTC public-network flag (Isaac Sim side only, same behaviour
+#                       in practice — client still needs the SSH tunnel)
+#
+# TensorBoard is always started on the instance (port 6006).
+# An SSH tunnel command is printed at the end; run it in a separate terminal.
 #
 # Examples:
 #   # Train example 05 on a 3090
 #   bash scripts/vast_launch.sh -- python -m examples.05_ppo_cnn.train --timesteps 250000
 #
-#   # Train example 07 (Isaac Lab) on a 4090
-#   bash scripts/vast_launch.sh --gpu RTX_4090 --isaac -- python -m examples.07_isaac_transfer.train --timesteps 200000
+#   # Train example 07 (Isaac Lab) on a 5090 with WebRTC streaming
+#   bash scripts/vast_launch.sh --gpu RTX_5090 --isaac --max-dph 1.00 --min-dph 0.8 \
+#       --livestream 2 -- python -m examples.07_isaac_transfer.train --timesteps 200000
+#   # Then run the printed SSH tunnel and enter "localhost" in the streaming client
 #
 #   # Quick smoke-test, cheap GPU, short run
 #   bash scripts/vast_launch.sh --gpu RTX_3080 --max-dph 0.30 \
@@ -160,19 +173,21 @@ echo "  \u2192 Best offer: id=$OFFER_ID  (\$$OFFER_DPH/hr)"
 echo ""
 
 # ── Create instance --------------------------------------------------------
-# Expose Isaac Sim streaming ports when requested
-# Isaac Sim 5.x WebRTC uses:
-#   49100/tcp  — signaling (WebSocket)
-#   47998/udp  — media stream (video frames)
-# Native Omniverse client (livestream=1) uses 8211/tcp instead.
+# Isaac Sim 5.x WebRTC signaling (49100/tcp) is tunnelled over SSH so the
+# client can always connect to localhost:49100 regardless of vast.ai port
+# mapping.  The UDP media stream (47998) typically works once the signaling
+# channel is established through the same host.
+# Native Omniverse client (livestream=1) still uses a direct port exposure.
 STREAM_PORTS=""
-if [[ $LIVESTREAM -eq 2 ]]; then
-  STREAM_PORTS="-p 49100:49100 -p 47998:47998/udp"
-  echo "  → Livestream 2 (WebRTC) enabled — ports 49100/tcp + 47998/udp will be exposed"
+if [[ $LIVESTREAM -eq 1 ]]; then
+  # WebRTC over public/internet networks — vast.ai exposes 49100/tcp + 47998/udp
+  # Isaac Sim also needs PUBLIC_IP set so ICE candidates include the external address.
+  echo "  → Livestream 1 (WebRTC, public network) — ports 49100/tcp + 47998/udp exposed"
   echo "     Download client: https://docs.isaacsim.omniverse.nvidia.com/latest/installation/download.html"
-elif [[ $LIVESTREAM -eq 1 ]]; then
-  STREAM_PORTS="-p 8211:8211"
-  echo "  → Livestream 1 (native Omniverse client) enabled — port 8211/tcp will be exposed"
+elif [[ $LIVESTREAM -eq 2 ]]; then
+  # WebRTC over local/private network — signaling tunnelled via SSH to localhost:49100
+  echo "  → Livestream 2 (WebRTC, local/private network) — tunnel via SSH to localhost:49100"
+  echo "     Download client: https://docs.isaacsim.omniverse.nvidia.com/latest/installation/download.html"
 fi
 
 echo "Creating instance (image: $IMAGE, disk: ${DISK_GB}GB) ..."
@@ -281,9 +296,10 @@ if [[ $ISAAC -eq 1 ]]; then
   echo "Installing isaaclab into Isaac Sim Python ..."
   \$ISAAC_PY -m pip install --no-cache-dir -e /workspace/isaaclab_src/source/isaaclab 
 
-  # 3. Install skrl, gymnasium, and h5py into same Python
+  # 3. Install skrl, gymnasium, h5py, and video recording deps into same Python
   #    h5py is required by isaaclab_tasks at extension startup (recorder_manager)
-  \$ISAAC_PY -m pip install --no-cache-dir "skrl>=2.0.0" "gymnasium>=1.0.0" h5py 
+  #    imageio + imageio-ffmpeg are used by examples/07_isaac_transfer/record.py
+  \$ISAAC_PY -m pip install --no-cache-dir "skrl>=2.0.0" "gymnasium>=1.0.0" h5py imageio imageio-ffmpeg 
 else
   # ── Regular PyTorch image ───────────────────────────────────────────────
   # --break-system-packages is safe: we own the whole container.
@@ -307,6 +323,11 @@ fi
 # Rewrite 'python' or 'python3' at the start of the command to the right binary
 REMOTE_CMD=$(echo "$REMOTE_CMD" | sed "s|^python[0-9.]*|$PYTHON_BIN|")
 
+# Forward --livestream to Isaac Sim's AppLauncher (it opens the WebRTC/native server)
+if [[ $LIVESTREAM -gt 0 ]]; then
+  REMOTE_CMD="$REMOTE_CMD --livestream $LIVESTREAM"
+fi
+
 # shellcheck disable=SC2087
 ssh $SSH_OPTS -p "$SSH_PORT" "root@$SSH_HOST" bash <<REMOTE
 set -e
@@ -315,6 +336,7 @@ export PYTHONPATH=/workspace/reinforced
 cd /workspace/reinforced
 tmux new-session -d -s train "
   export PYTHONPATH=/workspace/reinforced
+  export PUBLIC_IP=\$(curl -s --max-time 5 ifconfig.me 2>/dev/null || hostname -I | awk '{print \$1}')
   cd /workspace/reinforced
   ${REMOTE_CMD} 2>&1 | tee /workspace/train.log
   echo '=== TRAINING FINISHED ===' >> /workspace/train.log
@@ -324,48 +346,43 @@ echo "  Tail log:  ssh -p $SSH_PORT root@$SSH_HOST 'tail -f /workspace/train.log
 
 # ── TensorBoard (detached, logs to /tmp/tb.log) ----------------------------
 pkill -f 'tensorboard' 2>/dev/null || true
-nohup tensorboard --logdir /workspace/reinforced/runs --host 127.0.0.1 --port 6006 \
+if [[ $ISAAC -eq 1 ]]; then
+  TB_CMD="/isaac-sim/python.sh -m tensorboard.main"
+  # Ensure tensorboard is installed in Isaac Sim's Python
+  /isaac-sim/python.sh -m pip install -q tensorboard 2>/dev/null || true
+else
+  TB_CMD="python3 -m tensorboard.main"
+fi
+nohup \$TB_CMD --logdir /workspace/reinforced/runs --host 127.0.0.1 --port 6006 \
   > /tmp/tb.log 2>&1 &
-# Wait until TensorBoard is actually listening before the tunnel is opened
+# Wait until TensorBoard is actually listening
 for _i in {1..15}; do
   sleep 2
-  if ss -tlnp 2>/dev/null | grep -q ':6006' || netstat -tlnp 2>/dev/null | grep -q ':6006'; then
+  if python3 -c "import socket; s=socket.socket(); r=s.connect_ex(('127.0.0.1',6006)); s.close(); exit(0 if r==0 else 1)" 2>/dev/null; then
     echo "  TensorBoard ready on remote port 6006"
     break
   fi
 done
 REMOTE
 
-# ── SSH tunnel for TensorBoard (background, killed on script exit) ---------
-echo ""
-echo "Opening TensorBoard tunnel on localhost:6006 ..."
-ssh $SSH_OPTS -p "$SSH_PORT" -L 6006:127.0.0.1:6006 -N "root@$SSH_HOST" &
-TB_TUNNEL_PID=$!
-trap 'kill $TB_TUNNEL_PID 2>/dev/null' EXIT
-echo "  TensorBoard: http://localhost:6006  (tunnel PID $TB_TUNNEL_PID)"
-echo "  To keep it open after this script exits, run:"
-echo "    ssh $SSH_OPTS -p $SSH_PORT -L 6006:127.0.0.1:6006 -N root@$SSH_HOST &"
+# ── Start remote UDP→TCP socat bridge (for WebRTC media on 47998/udp) -----
+# SSH can only forward TCP. socat relays UDP 47998 ↔ TCP 47999 so the SSH
+# tunnel can carry WebRTC media.
+if [[ $LIVESTREAM -gt 0 ]]; then
+  ssh $SSH_OPTS -p "$SSH_PORT" "root@$SSH_HOST" \
+    "apt-get install -y -qq socat 2>/dev/null; \
+     pkill -f 'socat.*47998' 2>/dev/null || true; \
+     nohup socat TCP4-LISTEN:47999,reuseaddr,fork UDP4:127.0.0.1:47998 \
+       > /tmp/socat_udp.log 2>&1 &"
+  echo "  Remote socat UDP bridge started (47999/tcp → 47998/udp)"
+fi
 
-# ── Resolve mapped WebRTC ports from vast.ai API --------------------------
-VAST_TCP_PORT_49100=""
-VAST_UDP_PORT_47998=""
-if [[ $LIVESTREAM -eq 2 ]]; then
-  PORT_JSON=$(vastai show instance "$INSTANCE_ID" --raw 2>/dev/null || true)
-  VAST_TCP_PORT_49100=$(echo "$PORT_JSON" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-ports = d.get('ports') or {}
-# key format is '49100/tcp'
-entry = ports.get('49100/tcp', [{}])
-print(entry[0].get('HostPort', '?') if entry else '?')
-" 2>/dev/null || echo "?")
-  VAST_UDP_PORT_47998=$(echo "$PORT_JSON" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-ports = d.get('ports') or {}
-entry = ports.get('47998/udp', [{}])
-print(entry[0].get('HostPort', '?') if entry else '?')
-" 2>/dev/null || echo "?")
+# ── Build tunnel command --------------------------------------------------
+# Streaming client hardcodes port 49100 — always tunnel it regardless of mode.
+# Port 47999 carries the socat-bridged WebRTC media (UDP 47998 on remote).
+TUNNEL_SPEC="-L 6006:127.0.0.1:6006"
+if [[ $LIVESTREAM -gt 0 ]]; then
+  TUNNEL_SPEC="$TUNNEL_SPEC -L 49100:127.0.0.1:49100 -L 47999:127.0.0.1:47999"
 fi
 
 # ── Print summary ----------------------------------------------------------
@@ -381,19 +398,16 @@ echo " Dashboard : https://cloud.vast.ai/instances/"
 echo ""
 echo " Sync results  : bash scripts/vast_sync.sh"
 echo " Destroy when done: bash scripts/vast_destroy.sh"
+echo ""
+echo " ── Tunnels (run in a separate terminal) ────────────"
+echo "   ssh $SSH_OPTS -p $SSH_PORT $TUNNEL_SPEC -N root@$SSH_HOST"
 if [[ $LIVESTREAM -gt 0 ]]; then
   echo ""
   echo " ── Livestream ──────────────────────────────────────"
-  if [[ $LIVESTREAM -eq 2 ]]; then
-    echo " WebRTC (native client):"
-    echo "   Signal port : $SSH_HOST:$VAST_TCP_PORT_49100  (TCP)"
-    echo "   Media port  : $SSH_HOST:$VAST_UDP_PORT_47998  (UDP)"
-    echo "   Run the Isaac Sim WebRTC Streaming Client app and"
-    echo "   enter the above signal address as the server."
-    echo "   (ports are in vast.ai dashboard under 'IP Port Info')"
-  else
-    echo " Native client  : connect Omniverse Streaming Client to $SSH_HOST:<port>"
-    echo "   (check TCP port for 8211 in vast.ai dashboard 'IP Port Info')"
-  fi
+  echo " 1) Run the tunnel above in a separate terminal."
+  echo " 2) In ANOTHER terminal run the local UDP bridge:"
+  echo "      socat UDP4-LISTEN:47998,reuseaddr,fork TCP4:127.0.0.1:47999"
+  echo " 3) Open the Isaac Sim WebRTC Streaming Client and enter: localhost"
+  echo "    (client hardcodes port 49100)"
 fi
 echo "================================================================"

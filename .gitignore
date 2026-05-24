@@ -19,3 +19,4 @@ videos/
 # Editor
 .vscode/
 *.swp
+.vast_instance_id
