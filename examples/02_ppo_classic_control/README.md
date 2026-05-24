@@ -14,6 +14,18 @@ Use a cleaner project-style workflow with separate scripts for training and eval
 - Training script builds agent and runs `trainer.train()`.
 - Evaluation script recreates architecture, loads checkpoint, and runs `trainer.eval()`.
 
+### Why separate train and eval scripts?
+
+A trained policy should be evaluated under a **fixed protocol** rather than
+inspected during the noisy training process. `train.py` runs PPO with
+stochastic actions (exploration); `eval.py` reloads the checkpoint and runs
+the policy **deterministically** (mean action, no noise) for a set number of
+episodes.
+
+Separating the scripts enforces a good habit: the evaluation code is
+independent of the training code, so you can change your training loop without
+accidentally changing how you measure performance.
+
 ## Run
 
 All commands must be run from the **project root** using the `-m` flag.
