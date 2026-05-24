@@ -35,6 +35,13 @@
 - Example 07 keeps PPO + CNN design, swaps environment stack to Isaac Lab.
 - Goal: recognize what generalizes across simulators and what is simulator-specific.
 
+## Stage 8: Custom Scene and Task from Scratch
+
+- Example 08 implements a Franka Panda reaching task as a custom `DirectRLEnv` subclass.
+- No pre-built environment: the scene (`_setup_scene`), reward (`_get_rewards`), observations (`_get_observations`), and resets (`_reset_idx`) are all written by hand.
+- Observations switch back to a proprioceptive MLP (joint states + goal position); no camera needed.
+- Goal: understand the full environment authoring loop: scene config → asset spawning → physics loop → RL interface.
+
 ## Suggested Study Pattern
 
 1. Run each example with a tiny `--timesteps` value first.
