@@ -42,6 +42,12 @@
 - Observations switch back to a proprioceptive MLP (joint states + goal position); no camera needed.
 - Goal: understand the full environment authoring loop: scene config → asset spawning → physics loop → RL interface.
 
+## Stage 9: Asset Zoo
+
+- Example 09 catalogues every robot and environment that ships with `isaaclab_assets` and Isaac Sim.
+- A `browse.py` script spawns any listed robot, runs physics, and prints its joint names, limits, and DOF count.
+- Goal: know what assets exist before designing a new task; learn the one-line robot swap pattern and the three numbers that must agree (DOFs → `num_actions` → policy output size).
+
 ## Suggested Study Pattern
 
 1. Run each example with a tiny `--timesteps` value first.
