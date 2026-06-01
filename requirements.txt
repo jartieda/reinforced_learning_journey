@@ -1,7 +1,21 @@
-torch>=2.3.0
+#torch>=2.3.0
+#torchvision>=0.18.0
 skrl>=1.4.0
 gymnasium>=1.0.0
 gymnasium[box2d]>=1.0.0
 numpy>=1.26.0
+Pillow>=10.0.0
+websocket-client>=1.6.0
+
+# NOMAD / visualnav-transformer dependencies
+efficientnet-pytorch>=0.7.1
+diffusers>=0.11.1
+positional-encodings>=6.0.0
+vit-pytorch>=1.6.0
+tqdm>=4.64.0
+opencv-python>=4.6.0
+matplotlib>=3.7.0
+lmdb>=1.4.0
+
 #pip install "isaacsim[all,extscache]==5.1.0" --extra-index-url https://pypi.nvidia.com
 #pip install -U torch==2.7.0 torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cu128
