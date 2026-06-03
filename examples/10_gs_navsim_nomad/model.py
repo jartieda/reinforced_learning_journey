@@ -95,10 +95,12 @@ class NomadPolicy(GaussianMixin, Model):
         # Reshape from flat (B, 15*96*96) back to (B, 15, 96, 96) if needed
         if obs.dim() == 2:
             obs = obs.view(obs.shape[0], *self.observation_space.shape)
+        # Add batch dim if missing (e.g. single-env wrapper returns (C, H, W))
+        elif obs.dim() == 3:
+            obs = obs.unsqueeze(0)
 
         obs_img, goal_img = _split_obs(obs)
 
-        # NOMAD encoder is frozen → no grad needed
         with torch.no_grad():
             B = obs_img.shape[0]
             goal_mask = torch.zeros(B, dtype=torch.long, device=obs_img.device)
@@ -109,7 +111,7 @@ class NomadPolicy(GaussianMixin, Model):
 
 
 class NomadValue(DeterministicMixin, Model):
-    """State-value estimator: NOMAD encoder (shared, frozen) + trainable MLP head."""
+    """Value function: NOMAD encoder (frozen) + trainable MLP head."""
 
     def __init__(self, *args, weights_path: str | Path = NOMAD_WEIGHTS, **kwargs):
         Model.__init__(self, *args, **kwargs)
@@ -126,6 +128,8 @@ class NomadValue(DeterministicMixin, Model):
         obs = inputs.get("observations", inputs.get("states")).float()
         if obs.dim() == 2:
             obs = obs.view(obs.shape[0], *self.observation_space.shape)
+        elif obs.dim() == 3:
+            obs = obs.unsqueeze(0)
 
         obs_img, goal_img = _split_obs(obs)
 

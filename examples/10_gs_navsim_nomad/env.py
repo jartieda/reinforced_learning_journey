@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import json
+import queue
 import threading
 import time
 from collections import deque
@@ -186,8 +187,7 @@ class GsNavSimEnv(gym.Env):
 
         # WebSocket state
         self._ws:          websocket.WebSocket | None = None
-        self._last_image:  np.ndarray | None = None
-        self._image_event  = threading.Event()
+        self._image_queue: queue.Queue = queue.Queue()
         self._collision_flag = False  # set by _recv_loop when sim reports collision
 
         # Episode counters / tracking
@@ -199,17 +199,24 @@ class GsNavSimEnv(gym.Env):
     def _connect(self):
         if self._ws is not None:
             return
-        self._ws = websocket.create_connection(self.ws_url, timeout=10)
+        print(f"[env] connecting to {self.ws_url}...")
+        self._ws = websocket.create_connection(self.ws_url)
+        print("[env] connected, identifying as robot")
         self._ws.send(json.dumps({"type": "identify", "client": "robot"}))
         # Start receiver thread
         self._receiver_thread = threading.Thread(target=self._recv_loop, daemon=True)
         self._receiver_thread.start()
+        print("[env] recv_loop started")
 
     def _recv_loop(self):
         """Background thread that reads all WebSocket messages."""
         while self._ws is not None:
             try:
                 raw = self._ws.recv()
+            except Exception as e:
+                print(f"[env] recv_loop socket error: {e}")
+                break
+            try:
                 msg = json.loads(raw)
                 mtype = msg.get("type")
                 if mtype in ("image_data", "rendered_image"):
@@ -220,22 +227,23 @@ class GsNavSimEnv(gym.Env):
                         b64 = data_url
                     img_bytes = base64.b64decode(b64)
                     pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-                    self._last_image = np.asarray(pil)
-                    self._image_event.set()
+                    arr = np.array(pil)  # copy — avoids PIL buffer GC issue
+                    print(f"[env] image received: {arr.shape}")
+                    self._image_queue.put(arr)
                 elif mtype == "collision":
-                    # Sim blocked the move and is reporting a collision.
-                    # The image for this step is still coming (sent right after).
                     self._collision_flag = True
-            except Exception:
-                break
+                    print("[env] collision received")
+            except Exception as e:
+                print(f"[env] recv_loop parse error: {e}")
+                # Don't break — keep the loop alive for the next message
 
-    def _wait_for_image(self, timeout: float = 5.0) -> np.ndarray:
-        self._image_event.clear()
-        self._image_event.wait(timeout=timeout)
-        if self._last_image is None:
-            # Return black frame as fallback
+    def _wait_for_image(self, timeout: float = 10.0) -> np.ndarray:
+        try:
+            img = self._image_queue.get(timeout=timeout)
+            return img
+        except queue.Empty:
+            print(f"[env] WARNING: no image received within {timeout}s — using black frame")
             return np.zeros((IMG_SIZE, IMG_SIZE, 3), dtype=np.uint8)
-        return self._last_image
 
     def _send(self, msg: dict):
         self._ws.send(json.dumps(msg))
@@ -265,7 +273,12 @@ class GsNavSimEnv(gym.Env):
             x0, z0 = 0.0, 0.0
         rot0 = float(self.rng.uniform(0, 2 * np.pi))
 
-        # Reset robot in the simulator
+        # Flush stale frames before reset
+        while not self._image_queue.empty():
+            try:
+                self._image_queue.get_nowait()
+            except queue.Empty:
+                break
         self._send({
             "type":     "reset_robot",
             "x":        x0,
@@ -273,6 +286,7 @@ class GsNavSimEnv(gym.Env):
             "z":        z0,
             "rotation": rot0,
         })
+        print(f"[env] reset_robot sent to ({x0:.2f}, {z0:.2f}), waiting for image...")
         frame = self._wait_for_image()
 
         # Fill frame buffer with the initial frame
@@ -291,17 +305,31 @@ class GsNavSimEnv(gym.Env):
 
         # Convert 2D waypoint to [v, w] via PD controller
         v, w = _pd_controller(dx, dy)
-
+        # check v and w are not nan or inf before sending
+        if not np.isfinite(v) or not np.isfinite(w):
+            print(f"[env] WARNING: non-finite action computed from {action} → v={v}, w={w}")
+            v, w = 0.0, 0.0
+        # check v w for nan
+        if np.isnan(v) or np.isnan(w):
+            print(f"[env] WARNING: nan action computed from {action} → v={v}, w={w}")
+            v, w = 0.0, 0.0
         # Clear collision flag, then send the movement command.
         # If the sim detects a collision it will send a 'collision' WS message
         # BEFORE the image (socket.js uses a 100 ms delay before captureAndSendImage),
         # so _recv_loop will set _collision_flag before _image_event fires.
         self._collision_flag = False
+        # Flush any stale buffered frames before issuing the new command
+        while not self._image_queue.empty():
+            try:
+                self._image_queue.get_nowait()
+            except queue.Empty:
+                break
         self._send({
             "type":    "robot_command",
             "command": "set_velocity",
             "value":   [v, w],
         })
+        print(f"[env] set_velocity sent v={v:.3f} w={w:.3f}, waiting for image...")
         frame = self._wait_for_image()
         chw   = _preprocess(frame)
         self._frame_buffer.append(chw)
@@ -313,8 +341,9 @@ class GsNavSimEnv(gym.Env):
 
         # Reward
         curr_dist  = self._pixel_dist(chw)
-        reward     = (self._prev_pixel_dist - curr_dist) * 100.0
+        reward     = (self._prev_pixel_dist - curr_dist) * 10.0   # was *100; reduced to avoid large value targets
         reward    -= 0.01  # time penalty
+        reward    += 0.1   # survival bonus: reward each step without collision
         self._prev_pixel_dist = curr_dist
 
         # Success

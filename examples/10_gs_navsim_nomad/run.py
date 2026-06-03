@@ -33,7 +33,6 @@ parser.add_argument("--ws-url",     type=str, default="ws://localhost:8081")
 args = parser.parse_args()
 
 import torch
-from skrl.envs.wrappers.torch import wrap_env
 
 sys.path.insert(0, os.path.dirname(__file__))
 from env   import GsNavSimEnv                               # noqa: E402
@@ -46,14 +45,13 @@ def main() -> None:
     device = default_device()
 
     # ── Environment ────────────────────────────────────────────────────────────
-    raw_env = GsNavSimEnv(
+    env = GsNavSimEnv(
         goal_image_path=args.goal,
         mask_path=args.mask,
         ws_url=args.ws_url,
         max_steps=args.max_steps,
         seed=args.seed,
     )
-    env = wrap_env(raw_env)
 
     # ── Policy ─────────────────────────────────────────────────────────────────
     policy = NomadPolicy(
@@ -86,9 +84,15 @@ def main() -> None:
         done = False
         while not done:
             # Build input dict expected by skrl models
-            obs_tensor = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+            if isinstance(obs, torch.Tensor):
+                obs_tensor = obs.detach().clone().float().to(device)
+            else:
+                obs_tensor = torch.from_numpy(obs).float().to(device)
+            if obs_tensor.dim() == 3:
+                obs_tensor = obs_tensor.unsqueeze(0)
             with torch.no_grad():
-                action, _, _ = policy.act({"observations": obs_tensor}, role="policy")
+                act_out = policy.act({"observations": obs_tensor}, role="policy")
+                action = act_out[0]  # tensor (1, 2)
             action_np = action.squeeze(0).cpu().numpy()
 
             obs, reward, terminated, truncated, info = env.step(action_np)

@@ -89,12 +89,17 @@ def main() -> None:
         experiment_name=args.experiment_name,
         overrides={
             "rollouts":            256,
-            "learning_rate":       1e-4,
+            "learning_rate":       3e-5,   # lowered from 1e-4 to avoid NaN on first update
+            "learning_epochs":     4,      # lowered from default 8 for gradient stability
             "entropy_loss_scale":  0.01,
-            "mini_batches":        1,
+            "mini_batches":        4,      # split rollout into mini-batches for stability
             # Disable obs scaler — images are already ImageNet-normalised
             "state_preprocessor":       None,
             "state_preprocessor_kwargs": {},
+            # Disable value scaler — early training with few/identical rewards causes
+            # near-zero variance → RunningStandardScaler divides by ~0 → NaN loss
+            "value_preprocessor":       None,
+            "value_preprocessor_kwargs": {},
         },
     )
 
