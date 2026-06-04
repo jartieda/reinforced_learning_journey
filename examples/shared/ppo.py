@@ -20,10 +20,6 @@ def build_ppo_agent(
     known baseline.
     """
 
-    # PPO stores rollout transitions before each update phase. In on-policy RL,
-    # memory is consumed quickly and replaced by fresh trajectories.
-    memory = RandomMemory(memory_size=1024, num_envs=env.num_envs, device=device)
-
     # Define PPO config using only fields valid in skrl 2.x PPO_CFG.
     # Key renames from skrl 1.x: "lambda" -> "gae_lambda".
     # Removed keys that no longer exist: "clip_predicted_values".
@@ -69,6 +65,10 @@ def build_ppo_agent(
     }
     if overrides:
         cfg.update(overrides)
+
+    # PPO stores rollout transitions before each update phase. In on-policy RL,
+    # memory is consumed quickly and replaced by fresh trajectories.
+    memory = RandomMemory(memory_size=cfg["rollouts"], num_envs=env.num_envs, device=device)
 
     agent = PPO(
         models=models,
