@@ -194,6 +194,14 @@ class GsNavSimEnv(gym.Env):
         self._step_count = 0
         self._prev_pixel_dist = 1.0
 
+        # Exploration tracking (dead-reckoning grid coverage)
+        self._robot_x         = 0.0
+        self._robot_z         = 0.0
+        self._robot_theta     = 0.0
+        self._visited_cells: set[tuple[int, int]] = set()
+        self._explore_cell_size = 0.5   # world-unit grid resolution
+        self._explore_bonus     = 0.3   # reward per newly visited cell
+
     # ── Connection ─────────────────────────────────────────────────────────────
 
     def _connect(self):
@@ -297,6 +305,12 @@ class GsNavSimEnv(gym.Env):
 
         self._prev_pixel_dist = self._pixel_dist(chw)
 
+        # Initialise exploration state for this episode
+        self._robot_x     = x0
+        self._robot_z     = z0
+        self._robot_theta = rot0
+        self._visited_cells = {self._pos_to_cell(x0, z0)}
+
         obs = self._build_obs()
         return obs, {}
 
@@ -339,11 +353,18 @@ class GsNavSimEnv(gym.Env):
             obs = self._build_obs()
             return obs, -5.0, True, False, {"collision": True}
 
+        # Update dead-reckoning pose and compute exploration bonus
+        self._update_pose(v, w)
+        cell = self._pos_to_cell(self._robot_x, self._robot_z)
+        explore_bonus = self._explore_bonus if cell not in self._visited_cells else 0.0
+        self._visited_cells.add(cell)
+
         # Reward
         curr_dist  = self._pixel_dist(chw)
         reward     = (self._prev_pixel_dist - curr_dist) * 10.0   # was *100; reduced to avoid large value targets
         reward    -= 0.01  # time penalty
         reward    += 0.1   # survival bonus: reward each step without collision
+        reward    += explore_bonus  # bonus for visiting a new map cell
         self._prev_pixel_dist = curr_dist
 
         # Success
@@ -356,7 +377,12 @@ class GsNavSimEnv(gym.Env):
         terminated = success
 
         obs = self._build_obs()
-        return obs, reward, terminated, truncated, {"pixel_dist": curr_dist, "success": success}
+        return obs, reward, terminated, truncated, {
+            "pixel_dist":     curr_dist,
+            "success":        success,
+            "explored_cells": len(self._visited_cells),
+            "explore_bonus":  explore_bonus,
+        }
 
     def close(self):
         if self._ws is not None:
@@ -373,6 +399,16 @@ class GsNavSimEnv(gym.Env):
     def _pixel_dist(self, frame_chw: np.ndarray) -> float:
         """Mean squared pixel difference between current frame and goal."""
         return float(np.mean((frame_chw - self._goal_chw) ** 2))
+
+    def _pos_to_cell(self, x: float, z: float) -> tuple[int, int]:
+        """Discretise world (x, z) to an exploration grid cell index."""
+        return (int(x / self._explore_cell_size), int(z / self._explore_cell_size))
+
+    def _update_pose(self, v: float, w: float, dt: float = 0.1) -> None:
+        """Dead-reckoning pose update from linear/angular velocity."""
+        self._robot_x     += v * np.cos(self._robot_theta) * dt
+        self._robot_z     += v * np.sin(self._robot_theta) * dt
+        self._robot_theta += w * dt
 
 
 # ── PD controller ──────────────────────────────────────────────────────────────
