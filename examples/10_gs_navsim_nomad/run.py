@@ -5,7 +5,6 @@ Usage
     python -m examples.10_gs_navsim_nomad.run \\
         --checkpoint runs/10_gs_navsim_nomad/checkpoints/agent_200000.pt \\
         --goal path/to/goal.png \\
-        --mask path/to/mask.json \\
         --episodes 5
 
 The script loads the saved policy weights, runs N episodes deterministically,
@@ -24,8 +23,6 @@ parser.add_argument("--checkpoint", type=str, required=True,
                     help="Path to a saved agent checkpoint (.pt).")
 parser.add_argument("--goal",       type=str, required=True,
                     help="Path to goal image (PNG/JPG).")
-parser.add_argument("--mask",       type=str, default=None,
-                    help="Path to obstacle mask JSON (from mask_editor).")
 parser.add_argument("--episodes",   type=int, default=5)
 parser.add_argument("--max-steps",  type=int, default=500)
 parser.add_argument("--seed",       type=int, default=0)
@@ -47,7 +44,6 @@ def main() -> None:
     # ── Environment ────────────────────────────────────────────────────────────
     env = GsNavSimEnv(
         goal_image_path=args.goal,
-        mask_path=args.mask,
         ws_url=args.ws_url,
         max_steps=args.max_steps,
         seed=args.seed,

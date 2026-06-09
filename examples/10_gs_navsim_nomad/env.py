@@ -56,20 +56,67 @@ def _load_goal(path: str | Path) -> np.ndarray:
 # ── Obstacle mask (matches mask.js MaskManager) ───────────────────────────────
 
 class _ObstacleMask:
-    """Reads the JSON exported by mask_editor.js and answers collision queries."""
+    """Reads an obstacle mask and answers collision queries.
+
+    Supports two formats:
+
+    **Old format** (``mask_editor.js`` → ``toJSON()``):
+        A single ``.json`` file with keys: ``resolution``, ``bounds``,
+        ``gridW``, ``gridH``, ``data`` (flat array of 0/1).
+
+    **New format** (``mask_editor.js`` → ``_saveMask()`` with sceneId):
+        Two co-located files in the same directory:
+        - ``occupancy.json``: ``{scale, min:[minX,minZ], max:[maxX,maxZ]}``
+        - ``occupancy.png`` : grayscale image where dark (< 128) = blocked.
+        Pass the path to ``occupancy.json``.
+    """
 
     def __init__(self, json_path: str | Path):
+        json_path = Path(json_path)
         with open(json_path) as f:
             data = json.load(f)
-        b = data["bounds"]
-        self.min_x  = float(b["minX"])
-        self.min_z  = float(b["minZ"])
-        self.res    = float(data["resolution"])
-        self.grid_w = int(data["gridW"])
-        self.grid_h = int(data["gridH"])
-        arr         = np.array(data["data"], dtype=bool)
-        self.grid   = arr.reshape(self.grid_h, self.grid_w)
-        # Pre-compute free cells for random spawn
+
+        if "data" in data:
+            # ── Old format ──────────────────────────────────────────────────
+            b = data["bounds"]
+            self.min_x  = float(b["minX"])
+            self.min_z  = float(b["minZ"])
+            self.res    = float(data["resolution"])
+            self.grid_w = int(data["gridW"])
+            self.grid_h = int(data["gridH"])
+            arr         = np.array(data["data"], dtype=np.uint8)
+            self.grid   = arr.reshape(self.grid_h, self.grid_w).astype(bool)
+        else:
+            # ── New format (PNG + occupancy.json) ───────────────────────────
+            self.res    = float(data["scale"])
+            self.min_x  = float(data["min"][0])
+            self.min_z  = float(data["min"][1])
+            max_x       = float(data["max"][0])
+            max_z       = float(data["max"][1])
+
+            png_path = json_path.parent / "occupancy.png"
+            if not png_path.exists():
+                raise FileNotFoundError(
+                    f"occupancy.png not found next to {json_path}"
+                )
+            img = Image.open(png_path).convert("L")  # grayscale
+            arr = np.asarray(img, dtype=np.uint8)     # shape (H, W)
+            self.grid   = arr < 128                   # dark → blocked
+            self.grid_h, self.grid_w = self.grid.shape
+
+            # Sanity-check: PNG dimensions should match JSON bounds ± 1 pixel
+            expected_w = round((max_x - self.min_x) / self.res)
+            expected_h = round((max_z - self.min_z) / self.res)
+            if abs(self.grid_w - expected_w) > 1 or abs(self.grid_h - expected_h) > 1:
+                import warnings
+                warnings.warn(
+                    f"PNG size ({self.grid_w}×{self.grid_h}) does not match "
+                    f"JSON bounds ({expected_w}×{expected_h}). "
+                    "Collision results may be inaccurate.",
+                    stacklevel=2,
+                )
+
+        # Pre-compute free cells for efficient random spawn
         rows, cols = np.where(~self.grid)
         self._free_cells = list(zip(rows.tolist(), cols.tolist()))
 
@@ -81,14 +128,23 @@ class _ObstacleMask:
         return bool(self.grid[row, col])
 
     def is_blocked_circle(self, x: float, z: float, radius: float) -> bool:
-        """Sample a few points on the footprint circle for a quick check."""
-        if self.is_blocked(x, z):
-            return True
-        for angle in np.linspace(0, 2 * np.pi, 8, endpoint=False):
-            cx = x + radius * np.cos(angle)
-            cz = z + radius * np.sin(angle)
-            if self.is_blocked(cx, cz):
-                return True
+        """True if any cell within `radius` world units of (x, z) is blocked.
+
+        Uses a proper cell-sweep (same logic as ``mask.js`` isBlockedCircle)
+        rather than sampling only 8 boundary points, so it is accurate for
+        large radii relative to cell size.
+        """
+        radius_cells = int(np.ceil(radius / self.res))
+        cx = int((x - self.min_x) / self.res)
+        cz = int((z - self.min_z) / self.res)
+        for dr in range(-radius_cells, radius_cells + 1):
+            for dc in range(-radius_cells, radius_cells + 1):
+                if np.sqrt(dc * dc + dr * dr) * self.res <= radius:
+                    if self.is_blocked(
+                        self.min_x + (cx + dc + 0.5) * self.res,
+                        self.min_z + (cz + dr + 0.5) * self.res,
+                    ):
+                        return True
         return False
 
     def random_free_position(
@@ -96,13 +152,11 @@ class _ObstacleMask:
     ) -> tuple[float, float]:
         """Return a random (x, z_mask) whose footprint is entirely unblocked.
 
-        z_mask is in mask coordinates (same as what the mask stores).
-        The caller must negate it before sending to the Three.js sim
-        because the sim uses  -z_threejs  when querying the mask.
+        ``z_mask`` is in mask coordinates (z_mask = −z_threejs).
+        The caller must negate it before sending to the Three.js simulator.
         """
         if not self._free_cells:
             return 0.0, 0.0
-        # Shuffle a copy so we try cells in random order without replacement.
         indices = rng.permutation(len(self._free_cells))
         for idx in indices:
             row, col = self._free_cells[int(idx)]
@@ -147,23 +201,21 @@ class GsNavSimEnv(gym.Env):
     def __init__(
         self,
         goal_image_path: str | Path,
-        mask_path:        str | Path | None = None,
         ws_url:           str               = "ws://localhost:8081",
         max_steps:        int               = 500,
         success_threshold: float            = 0.02,
+        robot_radius:     float             = 0.35,
         seed:             int | None        = None,
     ):
         super().__init__()
 
-        self.goal_image_path  = Path(goal_image_path)
-        self.ws_url           = ws_url
-        self.max_steps        = max_steps
+        self.goal_image_path   = Path(goal_image_path)
+        self.ws_url            = ws_url
+        self.max_steps         = max_steps
         self.success_threshold = success_threshold
+        self.robot_radius      = robot_radius
 
-        # Obstacle mask (optional)
-        self.mask = _ObstacleMask(mask_path) if mask_path else None
-
-        # RNG
+        # RNG (only used for episode-level seeding)
         self.rng = np.random.default_rng(seed)
 
         # Gymnasium spaces
@@ -189,6 +241,9 @@ class GsNavSimEnv(gym.Env):
         self._ws:          websocket.WebSocket | None = None
         self._image_queue: queue.Queue = queue.Queue()
         self._collision_flag = False  # set by _recv_loop when sim reports collision
+        # Spawn pose sent back by the simulator after reset_robot_random
+        self._spawn_pose: dict | None = None
+        self._pose_event  = threading.Event()
 
         # Episode counters / tracking
         self._step_count = 0
@@ -238,6 +293,10 @@ class GsNavSimEnv(gym.Env):
                     arr = np.array(pil)  # copy — avoids PIL buffer GC issue
                     print(f"[env] image received: {arr.shape}")
                     self._image_queue.put(arr)
+                elif mtype == "robot_pose":
+                    self._spawn_pose = msg
+                    self._pose_event.set()
+                    print(f"[env] robot_pose: x={msg.get('x',0):.2f} z={msg.get('z',0):.2f} rot={msg.get('rotation',0):.2f}")
                 elif mtype == "collision":
                     self._collision_flag = True
                     print("[env] collision received")
@@ -271,30 +330,35 @@ class GsNavSimEnv(gym.Env):
         self._connect()
         self._step_count = 0
 
-        # Choose a free spawn position.
-        # random_free_position returns mask coordinates where z_mask = -z_threejs
-        # (the editor stores obstacles at positive Z; the sim checks at -robot.z).
-        if self.mask:
-            x0, z0_mask = self.mask.random_free_position(self.rng)
-            z0 = -z0_mask   # convert mask → Three.js
-        else:
-            x0, z0 = 0.0, 0.0
-        rot0 = float(self.rng.uniform(0, 2 * np.pi))
-
-        # Flush stale frames before reset
+        # Flush stale frames and pose events before reset
         while not self._image_queue.empty():
             try:
                 self._image_queue.get_nowait()
             except queue.Empty:
                 break
+        self._spawn_pose = None
+        self._pose_event.clear()
+
+        # Ask the simulator to place the robot at a random collision-free position.
+        # The simulator responds with a 'robot_pose' message then a rendered image.
         self._send({
-            "type":     "reset_robot",
-            "x":        x0,
-            "y":        0.3,
-            "z":        z0,
-            "rotation": rot0,
+            "type":         "reset_robot_random",
+            "y":            0.50,
+            "robot_radius": self.robot_radius,
         })
-        print(f"[env] reset_robot sent to ({x0:.2f}, {z0:.2f}), waiting for image...")
+        print("[env] reset_robot_random sent, waiting for pose...")
+
+        # Wait for the pose acknowledgement (arrives before the image)
+        if not self._pose_event.wait(timeout=10.0):
+            print("[env] WARNING: no robot_pose within 10 s, using (0, 0)")
+            x0, z0, rot0 = 0.0, 0.0, 0.0
+        else:
+            pose = self._spawn_pose
+            x0   = float(pose.get("x",        0.0))
+            z0   = float(pose.get("z",        0.0))
+            rot0 = float(pose.get("rotation", 0.0))
+
+        print(f"[env] spawn: ({x0:.2f}, {z0:.2f}) rot={rot0:.2f} — waiting for image...")
         frame = self._wait_for_image()
 
         # Fill frame buffer with the initial frame

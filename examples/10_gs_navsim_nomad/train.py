@@ -4,14 +4,13 @@ Usage
 -----
     python -m examples.10_gs_navsim_nomad.train \\
         --goal path/to/goal.png \\
-        --mask path/to/mask.json \\
         --timesteps 200000
 
 Prerequisites
 -------------
     1. gs_navsim server running:  cd gs_navsim/backend && node server.js
     2. gs_navsim open in browser: http://localhost:3000
-    3. A PLY scene loaded in the browser.
+    3. A PLY scene loaded in the browser (with occupancy mask loaded).
     4. websocket-client installed:  pip install websocket-client
 """
 from __future__ import annotations
@@ -26,8 +25,6 @@ parser = argparse.ArgumentParser(
 )
 parser.add_argument("--goal",            type=str,   required=True,
                     help="Path to goal image (PNG/JPG).")
-parser.add_argument("--mask",            type=str,   default=None,
-                    help="Path to obstacle mask JSON (from mask_editor).")
 parser.add_argument("--timesteps",       type=int,   default=200_000)
 parser.add_argument("--max-steps",       type=int,   default=500,
                     help="Max steps per episode.")
@@ -60,7 +57,6 @@ def main() -> None:
     # ── Environment ────────────────────────────────────────────────────────────
     raw_env = GsNavSimEnv(
         goal_image_path=args.goal,
-        mask_path=args.mask,
         ws_url=args.ws_url,
         max_steps=args.max_steps,
         seed=args.seed,
