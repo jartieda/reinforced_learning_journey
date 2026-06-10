@@ -259,7 +259,7 @@ class GsNavSimEnv(gym.Env):
         self._robot_theta     = 0.0
         self._visited_cells: set[tuple[int, int]] = set()
         self._explore_cell_size = 0.5   # world-unit grid resolution
-        self._explore_bonus     = 0.3   # reward per newly visited cell
+        self._explore_bonus     = 10   # reward per newly visited cell
 
     # ── Connection ─────────────────────────────────────────────────────────────
 
