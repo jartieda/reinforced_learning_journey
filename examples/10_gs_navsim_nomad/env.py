@@ -245,6 +245,10 @@ class GsNavSimEnv(gym.Env):
         self._spawn_pose: dict | None = None
         self._pose_event  = threading.Event()
 
+        # Scene-loading synchronisation
+        self._scene_loaded_event = threading.Event()
+        self._scene_load_error: str | None = None
+
         # Episode counters / tracking
         self._step_count = 0
         self._prev_pixel_dist = 1.0
@@ -300,6 +304,14 @@ class GsNavSimEnv(gym.Env):
                 elif mtype == "collision":
                     self._collision_flag = True
                     print("[env] collision received")
+                elif mtype == "scene_loaded":
+                    self._scene_load_error = None
+                    self._scene_loaded_event.set()
+                    print(f"[env] scene_loaded: {msg.get('scene_id')}")
+                elif mtype == "scene_load_error":
+                    self._scene_load_error = msg.get("error", "unknown error")
+                    self._scene_loaded_event.set()
+                    print(f"[env] scene_load_error: {msg.get('scene_id')} — {self._scene_load_error}")
             except Exception as e:
                 print(f"[env] recv_loop parse error: {e}")
                 # Don't break — keep the loop alive for the next message
@@ -314,6 +326,36 @@ class GsNavSimEnv(gym.Env):
 
     def _send(self, msg: dict):
         self._ws.send(json.dumps(msg))
+
+    def load_scene(self, scene_id: str, timeout: float = 60.0) -> None:
+        """Ask the frontend to load a different scene and block until done.
+
+        Parameters
+        ----------
+        scene_id:
+            ID of the scene to load (must exist in the backend's DATA_DIR).
+        timeout:
+            Seconds to wait for the frontend to confirm the scene is loaded.
+
+        Raises
+        ------
+        RuntimeError
+            If the frontend reports an error or the timeout expires.
+        """
+        self._connect()
+        self._scene_loaded_event.clear()
+        self._scene_load_error = None
+        self._send({"type": "load_scene", "scene_id": scene_id})
+        print(f"[env] load_scene sent: {scene_id}")
+        if not self._scene_loaded_event.wait(timeout=timeout):
+            raise RuntimeError(
+                f"[env] load_scene timed out after {timeout}s for scene '{scene_id}'"
+            )
+        if self._scene_load_error:
+            raise RuntimeError(
+                f"[env] load_scene failed for '{scene_id}': {self._scene_load_error}"
+            )
+        print(f"[env] scene '{scene_id}' ready")
 
     # ── Gymnasium API ──────────────────────────────────────────────────────────
 
