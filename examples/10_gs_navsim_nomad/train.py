@@ -124,8 +124,6 @@ def main() -> None:
     print(f"  python -m examples.10_gs_navsim_nomad.run \\")
     print(f"      --checkpoint runs/10_gs_navsim_nomad/checkpoints/<agent_N>.pt \\")
     print(f"      --goal {args.goal}")
-    if args.mask:
-        print(f"      --mask {args.mask}")
 
 
 if __name__ == "__main__":
