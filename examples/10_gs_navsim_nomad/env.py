@@ -468,8 +468,8 @@ class GsNavSimEnv(gym.Env):
         # Reward
         curr_dist  = self._pixel_dist(chw)
         reward     = (self._prev_pixel_dist - curr_dist) * 10.0   # was *100; reduced to avoid large value targets
-        reward    -= 0.01  # time penalty
-        reward    += 0.1   # survival bonus: reward each step without collision
+        #reward    -= 0.01  # time penalty
+        #reward    += 0.1   # survival bonus: reward each step without collision
         reward    += explore_bonus  # bonus for visiting a new map cell
         self._prev_pixel_dist = curr_dist
 
