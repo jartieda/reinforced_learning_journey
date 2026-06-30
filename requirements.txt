@@ -16,6 +16,7 @@ tqdm>=4.64.0
 opencv-python>=4.6.0
 matplotlib>=3.7.0
 lmdb>=1.4.0
+vastai
 
 #pip install "isaacsim[all,extscache]==5.1.0" --extra-index-url https://pypi.nvidia.com
 #pip install -U torch==2.7.0 torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cu128

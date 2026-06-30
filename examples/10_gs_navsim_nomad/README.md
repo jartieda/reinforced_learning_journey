@@ -118,7 +118,7 @@ over walls and furniture, then click **💾 Guardar** to download `mask.json`.
 ```bash
 python -m examples.10_gs_navsim_nomad.train \
     --goal path/to/goal.png \
-    --mask path/to/mask.json \
+  --scene-id your_scene_id \
     --timesteps 200000
 ```
 
@@ -127,7 +127,7 @@ Key options:
 | Flag | Default | Description |
 |---|---|---|
 | `--goal` | *(required)* | Path to goal image (PNG/JPG) |
-| `--mask` | `None` | Obstacle mask JSON from the browser editor |
+| `--scene-id` | `None` | Scene folder id from gs_navsim backend data dir (auto-load scene) |
 | `--timesteps` | `200000` | Total environment steps to train |
 | `--max-steps` | `500` | Max steps per episode before truncation |
 | `--ws-url` | `ws://localhost:8081` | WebSocket URL of the gs_navsim server |
@@ -152,7 +152,7 @@ tensorboard --logdir runs/
 python -m examples.10_gs_navsim_nomad.run \
     --checkpoint runs/10_gs_navsim_nomad/checkpoints/agent_200000.pt \
     --goal path/to/goal.png \
-    --mask path/to/mask.json \
+  --scene-id your_scene_id \
     --episodes 10
 ```
 
@@ -240,3 +240,80 @@ is used.
   throughput than vectorised setups.
 - **WebSocket latency** — each step waits for a rendered image; keep the
   browser tab in the foreground and hardware-accelerated to minimise latency.
+
+---
+
+## Full Remote on vast.ai (backend + browser + training all remote)
+
+This mode runs everything in the same vast.ai instance:
+
+- gs_navsim backend (`node server.js`)
+- browser renderer (`chromium` under `Xvfb`)
+- PPO training (`python -m examples.10_gs_navsim_nomad.train`)
+
+### 1 — Prepare remote scene data layout
+
+Inside the remote machine/container, place scenes under one data directory:
+
+```
+/workspace/data/<scene_id>/3dgs_uncompressed.ply
+/workspace/data/<scene_id>/occupancy.json
+/workspace/data/<scene_id>/occupancy.png
+```
+
+`gs_navsim/backend/server.js` now reads this from `GS_DATA_DIR`.
+
+### 2 — Start gs_navsim backend remotely
+
+```bash
+cd /workspace/robot_nav/gs_navsim/backend
+npm install
+GS_DATA_DIR=/workspace/data node server.js
+```
+
+### 3 — Start browser renderer remotely (no local browser needed)
+
+```bash
+apt-get update && apt-get install -y xvfb chromium
+Xvfb :99 -screen 0 1280x720x24 &
+export DISPLAY=:99
+chromium \
+  --no-sandbox \
+  --disable-dev-shm-usage \
+  --ignore-gpu-blocklist \
+  --enable-webgl \
+  --use-gl=angle \
+  --app=http://127.0.0.1:3000 &
+```
+
+Keep this browser process alive during training.
+
+### 4 — Run training remotely
+
+```bash
+cd /workspace/robot_nav/reinforced
+export PYTHONPATH=/workspace/robot_nav/reinforced
+python -m examples.10_gs_navsim_nomad.train \
+  --goal /workspace/robot_nav/reinforced/examples/10_gs_navsim_nomad/goal.png \
+  --scene-id your_scene_id \
+  --ws-url ws://127.0.0.1:8081 \
+  --timesteps 200000
+```
+
+### 5 — Run evaluation remotely
+
+```bash
+python -m examples.10_gs_navsim_nomad.run \
+  --checkpoint runs/10_gs_navsim_nomad/checkpoints/agent_200000.pt \
+  --goal /workspace/robot_nav/reinforced/examples/10_gs_navsim_nomad/goal.png \
+  --scene-id your_scene_id \
+  --ws-url ws://127.0.0.1:8081 \
+  --episodes 10
+```
+
+### Notes for vast.ai
+
+- If you start from `reinforced/scripts/vast_launch.sh`, the script syncs only
+  the `reinforced/` directory. For full-remote Example 10 you must also upload
+  `gs_navsim/` and `visualnav-transformer/model_weights/nomad.pth`.
+- TensorBoard can still be tunneled with SSH (`-L 6006:127.0.0.1:6006`).

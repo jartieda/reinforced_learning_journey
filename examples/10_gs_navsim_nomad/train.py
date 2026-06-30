@@ -33,6 +33,8 @@ parser.add_argument("--checkpoint",      type=str,   default=None,
                     help="Resume from a saved checkpoint (.pt).")
 parser.add_argument("--experiment-name", type=str,   default="10_gs_navsim_nomad")
 parser.add_argument("--ws-url",          type=str,   default="ws://localhost:8081")
+parser.add_argument("--scene-id",        type=str,   default=None,
+                    help="Optional gs_navsim scene id to auto-load via WebSocket.")
 args = parser.parse_args()
 
 import torch
@@ -61,6 +63,10 @@ def main() -> None:
         max_steps=args.max_steps,
         seed=args.seed,
     )
+
+    if args.scene_id:
+        raw_env.load_scene(args.scene_id)
+
     env = wrap_env(raw_env)
 
     # ── Models ─────────────────────────────────────────────────────────────────

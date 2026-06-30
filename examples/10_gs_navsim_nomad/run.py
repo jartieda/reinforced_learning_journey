@@ -27,6 +27,8 @@ parser.add_argument("--episodes",   type=int, default=5)
 parser.add_argument("--max-steps",  type=int, default=500)
 parser.add_argument("--seed",       type=int, default=0)
 parser.add_argument("--ws-url",     type=str, default="ws://localhost:8081")
+parser.add_argument("--scene-id",   type=str, default=None,
+                    help="Optional gs_navsim scene id to auto-load via WebSocket.")
 args = parser.parse_args()
 
 import torch
@@ -48,6 +50,9 @@ def main() -> None:
         max_steps=args.max_steps,
         seed=args.seed,
     )
+
+    if args.scene_id:
+        env.load_scene(args.scene_id)
 
     # ── Policy ─────────────────────────────────────────────────────────────────
     policy = NomadPolicy(
