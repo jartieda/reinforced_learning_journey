@@ -40,6 +40,27 @@ echo "Syncing from instance $INSTANCE_ID ($SSH_HOST:$SSH_PORT) ..."
 
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10"
 
+# ── Resolve remote project root -------------------------------------------
+# New launcher path: /workspace/robot_nav/reinforced
+# Legacy path:       /workspace/reinforced
+REMOTE_ROOT=$(ssh $SSH_OPTS -p "$SSH_PORT" "root@$SSH_HOST" "
+  if [ -d /workspace/robot_nav/reinforced ]; then
+    echo /workspace/robot_nav/reinforced
+  elif [ -d /workspace/reinforced ]; then
+    echo /workspace/reinforced
+  else
+    echo ''
+  fi
+" 2>/dev/null || true)
+
+if [[ -z "$REMOTE_ROOT" ]]; then
+  echo "WARNING: Could not find remote reinforced directory."
+  echo "Checked: /workspace/robot_nav/reinforced and /workspace/reinforced"
+  echo "Skipping sync."
+  exit 0
+fi
+echo "Remote root detected: $REMOTE_ROOT"
+
 # ── Show live training log (optional) -------------------------------------
 TAIL_LOG=0
 for arg in "$@"; do
@@ -54,17 +75,21 @@ fi
 # ── Rsync results back to local machine -----------------------------------
 echo ""
 echo "Syncing runs/ ..."
-rsync -az --progress \
-  -e "ssh $SSH_OPTS -p $SSH_PORT" \
-  "root@$SSH_HOST:/workspace/reinforced/runs/" \
-  "$ROOT_DIR/runs/"
+if ssh $SSH_OPTS -p "$SSH_PORT" "root@$SSH_HOST" "[ -d $REMOTE_ROOT/runs ]" 2>/dev/null; then
+  rsync -az --progress \
+    -e "ssh $SSH_OPTS -p $SSH_PORT" \
+    "root@$SSH_HOST:$REMOTE_ROOT/runs/" \
+    "$ROOT_DIR/runs/"
+else
+  echo "No remote runs/ directory found at $REMOTE_ROOT/runs (nothing to sync yet)."
+fi
 
-if ssh $SSH_OPTS -p "$SSH_PORT" "root@$SSH_HOST" "[ -d /workspace/reinforced/videos ]" 2>/dev/null; then
+if ssh $SSH_OPTS -p "$SSH_PORT" "root@$SSH_HOST" "[ -d $REMOTE_ROOT/videos ]" 2>/dev/null; then
   echo ""
   echo "Syncing videos/ ..."
   rsync -az --progress \
     -e "ssh $SSH_OPTS -p $SSH_PORT" \
-    "root@$SSH_HOST:/workspace/reinforced/videos/" \
+    "root@$SSH_HOST:$REMOTE_ROOT/videos/" \
     "$ROOT_DIR/videos/"
 fi
 

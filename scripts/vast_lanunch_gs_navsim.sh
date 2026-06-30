@@ -37,6 +37,7 @@ IMAGE="pytorch/pytorch:2.7.0-cuda12.8-cudnn9-devel"
 MAX_DPH=0.80
 MIN_DPH=0.00
 DATA_DIR_REMOTE="/workspace/data"
+SCENE_SRC_LOCAL="/mnt/c/data"
 GOAL_REMOTE="/workspace/robot_nav/reinforced/examples/10_gs_navsim_nomad/goal.png"
 TIMESTEPS=200000
 MAX_STEPS=500
@@ -59,6 +60,8 @@ Options:
                          Default: /workspace/robot_nav/reinforced/examples/10_gs_navsim_nomad/goal.png
   --data-dir <path>      Remote scene data directory root.
                          Default: /workspace/data
+  --scene-src <path>     Local scene source root (contains <scene_id>/...).
+                         Default: /mnt/c/data
   --timesteps <int>      PPO total timesteps. Default: 200000
   --max-steps <int>      Max env steps per episode. Default: 500
   --seed <int>           RNG seed. Default: 42
@@ -91,6 +94,7 @@ while [[ $# -gt 0 ]]; do
     --scene-id)         SCENE_ID="$2"; shift 2 ;;
     --goal)             GOAL_REMOTE="$2"; shift 2 ;;
     --data-dir)         DATA_DIR_REMOTE="$2"; shift 2 ;;
+    --scene-src)        SCENE_SRC_LOCAL="$2"; shift 2 ;;
     --timesteps)        TIMESTEPS="$2"; shift 2 ;;
     --max-steps)        MAX_STEPS="$2"; shift 2 ;;
     --seed)             SEED="$2"; shift 2 ;;
@@ -279,6 +283,21 @@ else
   echo "Skipping sync (--skip-sync)"
 fi
 
+# ── Sync selected scene assets to remote data dir --------------------------
+LOCAL_SCENE_DIR="${SCENE_SRC_LOCAL%/}/$SCENE_ID"
+if [[ ! -d "$LOCAL_SCENE_DIR" ]]; then
+  echo "ERROR: Local scene dir not found: $LOCAL_SCENE_DIR"
+  echo "Use --scene-src to point to the correct local root."
+  exit 1
+fi
+
+echo "Syncing scene assets: $LOCAL_SCENE_DIR -> $DATA_DIR_REMOTE/$SCENE_ID ..."
+ssh $SSH_OPTS -p "$SSH_PORT" "root@$SSH_HOST" "mkdir -p '$DATA_DIR_REMOTE/$SCENE_ID'"
+rsync -az --progress \
+  -e "ssh $SSH_OPTS -p $SSH_PORT" \
+  "$LOCAL_SCENE_DIR/" \
+  "root@$SSH_HOST:$DATA_DIR_REMOTE/$SCENE_ID/"
+
 # ── Remote setup and launch ────────────────────────────────────────────────
 REMOTE_CHECKPOINT_ARG=""
 if [[ -n "$CHECKPOINT" ]]; then
@@ -301,7 +320,7 @@ apt-get install -y --no-install-recommends \
 # Install Node.js 20 from NodeSource (required for modern JS syntax in server.js)
 mkdir -p /etc/apt/keyrings
 curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
-  | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+  | gpg --batch --yes --dearmor -o /etc/apt/keyrings/nodesource.gpg
 chmod a+r /etc/apt/keyrings/nodesource.gpg
 cat > /etc/apt/sources.list.d/nodesource.list <<'EOF'
 deb [arch=amd64 signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main
@@ -311,7 +330,7 @@ apt-get install -y --no-install-recommends nodejs
 
 # Install Google Chrome Stable (works reliably in Docker + Xvfb)
 curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
-  | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg
+  | gpg --batch --yes --dearmor -o /etc/apt/keyrings/google-chrome.gpg
 chmod a+r /etc/apt/keyrings/google-chrome.gpg
 cat > /etc/apt/sources.list.d/google-chrome.list <<'EOF'
 deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main
