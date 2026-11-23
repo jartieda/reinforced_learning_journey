@@ -23,6 +23,9 @@ import sys
 parser = argparse.ArgumentParser(
     description="Example 10 — gs_navsim + NOMAD PPO training"
 )
+parser.add_argument("--arch",            type=str,   default="nomad",
+                    choices=["nomad", "cv181x"],
+                    help="Policy/value architecture: nomad (default) or cv181x.")
 parser.add_argument("--goal",            type=str,   required=True,
                     help="Path to goal image (PNG/JPG).")
 parser.add_argument("--timesteps",       type=int,   default=200_000)
@@ -44,7 +47,8 @@ from skrl.trainers.torch import SequentialTrainer
 # Add this example dir to sys.path so sibling imports work
 sys.path.insert(0, os.path.dirname(__file__))
 from env   import GsNavSimEnv                               # noqa: E402
-from model import NomadPolicy, NomadValue, NOMAD_WEIGHTS    # noqa: E402
+from model import NOMAD_WEIGHTS, NomadPolicy, NomadValue    # noqa: E402
+from model_cv181x import Cv181xPolicy, Cv181xValue          # noqa: E402
 
 from examples.shared.ppo   import build_ppo_agent           # noqa: E402
 from examples.shared.utils import (                         # noqa: E402
@@ -74,12 +78,21 @@ def main() -> None:
         observation_space=env.observation_space,
         action_space=env.action_space,
         device=device,
-        weights_path=NOMAD_WEIGHTS,
     )
-    models = {
-        "policy": NomadPolicy(**common),
-        "value":  NomadValue(**common),
-    }
+    if args.arch == "nomad":
+        models = {
+            "policy": NomadPolicy(**common, weights_path=NOMAD_WEIGHTS),
+            "value": NomadValue(**common, weights_path=NOMAD_WEIGHTS),
+        }
+        experiment_directory = "runs/10_gs_navsim_nomad"
+        run_title = "Example 10 — gs_navsim + NOMAD PPO"
+    else:
+        models = {
+            "policy": Cv181xPolicy(**common),
+            "value": Cv181xValue(**common),
+        }
+        experiment_directory = "runs/10_gs_navsim_nomad/cv181x"
+        run_title = "Example 10 — gs_navsim + CV181x PPO"
 
     # ── PPO agent ──────────────────────────────────────────────────────────────
     # Single-env → no RunningStandardScaler on observations (images already normalised).
@@ -87,7 +100,7 @@ def main() -> None:
         env=env,
         device=device,
         models=models,
-        experiment_directory="runs/10_gs_navsim_nomad",
+        experiment_directory=experiment_directory,
         experiment_name=args.experiment_name,
         overrides={
             "rollouts":            256,
@@ -109,7 +122,7 @@ def main() -> None:
         agent.load(args.checkpoint)
 
     print_run_banner(
-        "Example 10 — gs_navsim + NOMAD PPO",
+        run_title,
         env_id="GsNavSimEnv",
         timesteps=args.timesteps,
         device=device,
@@ -125,10 +138,11 @@ def main() -> None:
 
     env.close()
     print("\nTraining complete.")
-    print(f"Checkpoints saved to: runs/10_gs_navsim_nomad/")
+    print(f"Checkpoints saved to: {experiment_directory}/")
     print(f"\nTo run the trained policy:")
     print(f"  python -m examples.10_gs_navsim_nomad.run \\")
-    print(f"      --checkpoint runs/10_gs_navsim_nomad/checkpoints/<agent_N>.pt \\")
+    print(f"      --checkpoint {experiment_directory}/checkpoints/<agent_N>.pt \\")
+    print(f"      --arch {args.arch} \\")
     print(f"      --goal {args.goal}")
 
 

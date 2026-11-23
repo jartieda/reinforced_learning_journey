@@ -127,6 +127,7 @@ Key options:
 | Flag | Default | Description |
 |---|---|---|
 | `--goal` | *(required)* | Path to goal image (PNG/JPG) |
+| `--arch` | `nomad` | Model architecture: `nomad` or `cv181x` |
 | `--scene-id` | `None` | Scene folder id from gs_navsim backend data dir (auto-load scene) |
 | `--timesteps` | `200000` | Total environment steps to train |
 | `--max-steps` | `500` | Max steps per episode before truncation |
@@ -135,7 +136,10 @@ Key options:
 | `--checkpoint` | `None` | Resume from a saved checkpoint (`.pt`) |
 | `--experiment-name` | `10_gs_navsim_nomad` | TensorBoard run label |
 
-Checkpoints are saved to `runs/10_gs_navsim_nomad/checkpoints/`.
+Checkpoints are saved to:
+
+- `runs/10_gs_navsim_nomad/...` when `--arch nomad`
+- `runs/10_gs_navsim_nomad/cv181x/...` when `--arch cv181x`
 
 Monitor progress:
 
@@ -152,6 +156,7 @@ tensorboard --logdir runs/
 python -m examples.10_gs_navsim_nomad.run \
     --checkpoint runs/10_gs_navsim_nomad/checkpoints/agent_200000.pt \
     --goal path/to/goal.png \
+  --arch nomad \
   --scene-id your_scene_id \
     --episodes 10
 ```
@@ -163,6 +168,102 @@ Episode   1  |  steps= 147  reward=  +42.31  pixel_dist=0.0181  [SUCCESS]
 Episode   2  |  steps= 500  reward=  -12.05  pixel_dist=0.0834  [TIMEOUT]
 Episode   3  |  steps=  23  reward=  -25.00  pixel_dist=0.1203  [COLLISION]
 ```
+
+---
+
+## CV181x-Friendly Policy (No attention / no GroupNorm)
+
+### Model used for CV181x
+
+The `cv181x` architecture used in this example is implemented in
+`examples/10_gs_navsim_nomad/model_cv181x.py` as `Cv181xPolicy` and
+`Cv181xValue`.
+
+It is a pure CNN (no Transformer blocks) designed to avoid operations that are
+problematic for CV18xx lowering.
+
+Input/output contract:
+
+- Input: `(B, 15, 96, 96)` float32 (`4x RGB obs + 1x RGB goal`, CHW)
+- Policy output: `(B, 2)` action mean in `[-1, 1]` (final `Tanh`)
+- Value output: `(B, 1)` scalar value
+
+Backbone topology (shared by policy and value):
+
+1. `Conv2d(15->32, k=3, s=2, p=1) + ReLU`
+2. Depthwise-separable block: `DWConv(32->32, k=3, s=1, p=1) + PWConv(32->64) + ReLU`
+3. Depthwise-separable block: `DWConv(64->64, k=3, s=2, p=1) + PWConv(64->128) + ReLU`
+4. Depthwise-separable block: `DWConv(128->128, k=3, s=2, p=1) + PWConv(128->256) + ReLU`
+5. `AdaptiveAvgPool2d(1,1)` + flatten -> 256-d feature
+
+```mermaid
+flowchart TD
+  IN[observations
+  B x 15 x 96 x 96] --> C1[Conv 15->32
+  k3 s2 p1 + ReLU]
+  C1 --> B1[DWConv 32->32 k3 s1 p1
+  PWConv 32->64 + ReLU]
+  B1 --> B2[DWConv 64->64 k3 s2 p1
+  PWConv 64->128 + ReLU]
+  B2 --> B3[DWConv 128->128 k3 s2 p1
+  PWConv 128->256 + ReLU]
+  B3 --> GAP[AdaptiveAvgPool2d 1x1]
+  GAP --> F[Flatten
+  feature: B x 256]
+
+  F --> PH1[Policy Linear 256->256 + ReLU]
+  PH1 --> PH2[Policy Linear 256->2 + Tanh]
+  PH2 --> ACT[actions_mean
+  B x 2]
+
+  F --> VH1[Value Linear 256->256 + ReLU]
+  VH1 --> VH2[Value Linear 256->1]
+  VH2 --> VAL[value
+  B x 1]
+```
+
+Heads:
+
+- Policy head: `Linear(256->256) + ReLU + Linear(256->2) + Tanh`
+- Value head: `Linear(256->256) + ReLU + Linear(256->1)`
+
+Training vs deployment:
+
+- During PPO training, the policy is Gaussian (`log_std_parameter` is learned).
+- For export/deployment, deterministic actions (mean only) are used via the
+  wrapper in `examples/10_gs_navsim_nomad/export_onnx.py`.
+
+Why this model is suitable for CV181x:
+
+- Uses only Conv/DepthwiseConv/ReLU/GAP/Linear/Tanh-style ops.
+- Avoids `GroupNorm`, `LayerNorm`, attention, and dynamic-shape-heavy logic.
+- Preserves the same observation format as the NOMAD path, so env/preprocessing
+  code does not need to change.
+
+To train the TPU-MLIR-friendly architecture:
+
+```bash
+python -m examples.10_gs_navsim_nomad.train \
+  --goal path/to/goal.png \
+  --arch cv181x \
+  --timesteps 200000
+```
+
+Export deterministic ONNX (fixed shape) for TPU-MLIR:
+
+```bash
+python -m examples.10_gs_navsim_nomad.export_onnx \
+  --checkpoint runs/10_gs_navsim_nomad/cv181x/10_gs_navsim_nomad/checkpoints/agent_200000.pt \
+  --goal path/to/goal.png \
+  --arch cv181x \
+  --opset 17 \
+  --output policy_cv181x.onnx
+```
+
+The exporter uses stable I/O names and fixed shape:
+
+- Input: `observations` `[1, 15, 96, 96]`
+- Output: `actions` `[1, 2]`
 
 ---
 
@@ -243,77 +344,77 @@ is used.
 
 ---
 
-## Full Remote on vast.ai (backend + browser + training all remote)
+## Full Remote on vast.ai (recommended: one-command launcher)
 
-This mode runs everything in the same vast.ai instance:
+Use the dedicated launcher script that provisions/reuses an instance and runs
+everything end-to-end:
 
-- gs_navsim backend (`node server.js`)
-- browser renderer (`chromium` under `Xvfb`)
-- PPO training (`python -m examples.10_gs_navsim_nomad.train`)
+- gs_navsim backend
+- headless browser renderer (Chrome + Xvfb)
+- PPO training (`nomad` or `cv181x`)
 
-### 1 — Prepare remote scene data layout
-
-Inside the remote machine/container, place scenes under one data directory:
-
-```
-/workspace/data/<scene_id>/3dgs_uncompressed.ply
-/workspace/data/<scene_id>/occupancy.json
-/workspace/data/<scene_id>/occupancy.png
-```
-
-`gs_navsim/backend/server.js` now reads this from `GS_DATA_DIR`.
-
-### 2 — Start gs_navsim backend remotely
+Script:
 
 ```bash
-cd /workspace/robot_nav/gs_navsim/backend
-npm install
-GS_DATA_DIR=/workspace/data node server.js
+bash scripts/vast_lanunch_gs_navsim.sh --help
 ```
 
-### 3 — Start browser renderer remotely (no local browser needed)
+### 1 - Local prerequisites
+
+From `reinforced/` on your local machine:
+
+1. Create `reinforced/.env` with your vast.ai API key.
+2. Ensure `vastai` CLI is available in your shell (`pip install vastai`).
+3. Ensure the local scene exists at `/mnt/c/data/<scene_id>/` (or set `--scene-src`).
+4. Ensure a goal image exists in the repo root if using the default examples below:
+   `/workspace/robot_nav/goal.png` (remote path after sync).
+
+Minimal `.env`:
 
 ```bash
-apt-get update && apt-get install -y xvfb chromium
-Xvfb :99 -screen 0 1280x720x24 &
-export DISPLAY=:99
-chromium \
-  --no-sandbox \
-  --disable-dev-shm-usage \
-  --ignore-gpu-blocklist \
-  --enable-webgl \
-  --use-gl=angle \
-  --app=http://127.0.0.1:3000 &
+echo 'VAST_AI_API_KEY=your_key_here' > reinforced/.env
 ```
 
-Keep this browser process alive during training.
-
-### 4 — Run training remotely
+### 2 - Launch command (cv181x on RTX 5090, min cost 0.8)
 
 ```bash
-cd /workspace/robot_nav/reinforced
-export PYTHONPATH=/workspace/robot_nav/reinforced
-python -m examples.10_gs_navsim_nomad.train \
-  --goal /workspace/robot_nav/reinforced/examples/10_gs_navsim_nomad/goal.png \
-  --scene-id your_scene_id \
-  --ws-url ws://127.0.0.1:8081 \
-  --timesteps 200000
+cd reinforced
+bash scripts/vast_lanunch_gs_navsim.sh \
+  --scene-id 0001_839920 \
+  --goal /workspace/robot_nav/goal.png \
+  --arch cv181x \
+  --gpu RTX_5090 \
+  --min-dph 0.8 \
+  --max-dph 2.0
 ```
 
-### 5 — Run evaluation remotely
+Notes:
+
+- `--arch` supports `nomad` and `cv181x`.
+- If you set `--min-dph 0.8`, also raise `--max-dph` above `0.8` (default max is `0.8`).
+- The script syncs the full `robot_nav/` tree needed by this example.
+
+### 3 - Monitor logs
+
+The launcher prints the SSH endpoint and useful commands. Typical checks:
 
 ```bash
-python -m examples.10_gs_navsim_nomad.run \
-  --checkpoint runs/10_gs_navsim_nomad/checkpoints/agent_200000.pt \
-  --goal /workspace/robot_nav/reinforced/examples/10_gs_navsim_nomad/goal.png \
-  --scene-id your_scene_id \
-  --ws-url ws://127.0.0.1:8081 \
-  --episodes 10
+ssh -p <port> root@<host> 'tail -f /workspace/train.log'
+ssh -p <port> root@<host> 'tail -f /workspace/gs_backend.log'
+ssh -p <port> root@<host> 'tmux ls'
 ```
 
-### Notes for vast.ai
+### 4 - TensorBoard tunnel
 
-- If you start from `reinforced/scripts/vast_launch.sh`, the script syncs only
-  the `reinforced/` directory. For full-remote Example 10 you must also upload
-  `gs_navsim/` and `visualnav-transformer/model_weights/nomad.pth`.
-- TensorBoard can still be tunneled with SSH (`-L 6006:127.0.0.1:6006`).
+```bash
+ssh -o StrictHostKeyChecking=no -p <port> -L 6006:127.0.0.1:6006 -N root@<host>
+# open http://localhost:6006
+```
+
+### 5 - Sync outputs and destroy instance
+
+```bash
+cd reinforced
+bash scripts/vast_sync.sh
+bash scripts/vast_destroy.sh
+```

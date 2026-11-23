@@ -46,6 +46,7 @@ EXPERIMENT_NAME="10_gs_navsim_nomad"
 CHECKPOINT=""
 WS_URL="ws://127.0.0.1:8081"
 SCENE_ID=""
+ARCH="nomad"
 SKIP_SYNC=0
 SKIP_INSTALL=0
 
@@ -68,6 +69,7 @@ Options:
   --experiment-name <s>  TensorBoard run label. Default: 10_gs_navsim_nomad
   --checkpoint <path>    Optional remote checkpoint to resume.
   --ws-url <url>         WebSocket URL from remote trainer. Default: ws://127.0.0.1:8081
+  --arch <name>          Model architecture for training: nomad|cv181x. Default: nomad
 
   --gpu <name>           vast.ai GPU filter. Default: RTX_4090
   --disk <gb>            Instance disk size (GB). Default: 80
@@ -101,6 +103,7 @@ while [[ $# -gt 0 ]]; do
     --experiment-name)  EXPERIMENT_NAME="$2"; shift 2 ;;
     --checkpoint)       CHECKPOINT="$2"; shift 2 ;;
     --ws-url)           WS_URL="$2"; shift 2 ;;
+    --arch)             ARCH="$2"; shift 2 ;;
 
     --gpu)              GPU_FILTER="$2"; shift 2 ;;
     --disk)             DISK_GB="$2"; shift 2 ;;
@@ -118,6 +121,11 @@ done
 if [[ -z "$SCENE_ID" ]]; then
   echo "ERROR: --scene-id is required"
   usage
+  exit 1
+fi
+
+if [[ "$ARCH" != "nomad" && "$ARCH" != "cv181x" ]]; then
+  echo "ERROR: --arch must be 'nomad' or 'cv181x'"
   exit 1
 fi
 
@@ -464,6 +472,7 @@ tmux new-session -d -s train "
   cd /workspace/robot_nav/reinforced
   python3 -m examples.10_gs_navsim_nomad.train \
     --goal $GOAL_REMOTE \
+    --arch $ARCH \
     --scene-id $SCENE_ID \
     --ws-url $WS_URL \
     --timesteps $TIMESTEPS \
@@ -489,13 +498,14 @@ REMOTE
 
 echo ""
 echo "================================================================"
-echo " Remote gs_navsim + NOMAD training is running"
+echo " Remote gs_navsim training is running"
 echo "----------------------------------------------------------------"
 echo "Instance      : $INSTANCE_ID"
 echo "SSH           : ssh -p $SSH_PORT root@$SSH_HOST"
 echo "Scene ID      : $SCENE_ID"
 echo "Data dir      : $DATA_DIR_REMOTE"
 echo "Goal image    : $GOAL_REMOTE"
+echo "Architecture : $ARCH"
 echo ""
 echo "Logs"
 echo "  Backend     : ssh -p $SSH_PORT root@$SSH_HOST 'tail -f /workspace/gs_backend.log'"

@@ -19,6 +19,9 @@ import sys
 parser = argparse.ArgumentParser(
     description="Example 10 — run trained gs_navsim + NOMAD policy"
 )
+parser.add_argument("--arch",       type=str, default="nomad",
+                    choices=["nomad", "cv181x"],
+                    help="Policy architecture used by the checkpoint.")
 parser.add_argument("--checkpoint", type=str, required=True,
                     help="Path to a saved agent checkpoint (.pt).")
 parser.add_argument("--goal",       type=str, required=True,
@@ -35,7 +38,8 @@ import torch
 
 sys.path.insert(0, os.path.dirname(__file__))
 from env   import GsNavSimEnv                               # noqa: E402
-from model import NomadPolicy, NomadValue, NOMAD_WEIGHTS    # noqa: E402
+from model import NOMAD_WEIGHTS, NomadPolicy                # noqa: E402
+from model_cv181x import Cv181xPolicy                       # noqa: E402
 
 from examples.shared.utils import default_device            # noqa: E402
 
@@ -55,12 +59,19 @@ def main() -> None:
         env.load_scene(args.scene_id)
 
     # ── Policy ─────────────────────────────────────────────────────────────────
-    policy = NomadPolicy(
-        observation_space=env.observation_space,
-        action_space=env.action_space,
-        device=device,
-        weights_path=NOMAD_WEIGHTS,
-    )
+    if args.arch == "nomad":
+        policy = NomadPolicy(
+            observation_space=env.observation_space,
+            action_space=env.action_space,
+            device=device,
+            weights_path=NOMAD_WEIGHTS,
+        )
+    else:
+        policy = Cv181xPolicy(
+            observation_space=env.observation_space,
+            action_space=env.action_space,
+            device=device,
+        )
     policy.to(device)
 
     # Load saved weights — skrl saves {"policy": state_dict, "value": state_dict}
@@ -72,6 +83,7 @@ def main() -> None:
     policy.eval()
 
     print(f"Loaded checkpoint: {args.checkpoint}")
+    print(f"Architecture: {args.arch}")
     print(f"Running {args.episodes} episode(s) — deterministic policy\n")
 
     # ── Evaluation loop ────────────────────────────────────────────────────────
